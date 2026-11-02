@@ -16,6 +16,8 @@ function farmChannels() {
     ['expenses:create', 'expenses.add', (db, uid, input) => expenses.createExpense(db, uid, input)],
     ['incomes:list', 'expenses.view', (db, _uid, args) => expenses.listIncomes(db, args)],
     ['incomes:create', 'expenses.add', (db, uid, input) => expenses.createIncome(db, uid, input)],
+    ['expenses:cancel', 'expenses.edit', (db, uid, input) => expenses.cancelExpense(db, uid, input)],
+    ['incomes:cancel', 'expenses.edit', (db, uid, input) => expenses.cancelIncome(db, uid, input)],
 
     ['treasury:cashboxes', 'treasury.view', (db) => treasury.listCashboxes(db)],
     ['treasury:createCashbox', 'treasury.add', (db, uid, input) => treasury.createCashbox(db, uid, input)],

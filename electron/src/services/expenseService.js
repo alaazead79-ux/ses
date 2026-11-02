@@ -143,7 +143,7 @@ function listExpenses(db, { dateFrom = null, dateTo = null } = {}) {
   if (dateTo) { conditions.push('e.date <= ?'); params.push(assertIsoDate(dateTo)); }
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   return db.prepare(`
-    SELECT e.id, e.doc_number, e.date, e.amount, e.description, e.is_shared,
+    SELECT e.id, e.doc_number, e.date, e.amount, e.description, e.is_shared, e.cancelled_at,
       c.name AS category_name, a.name AS activity_name, b.name AS cashbox_name
     FROM expenses e
     LEFT JOIN expense_categories c ON c.id = e.category_id
@@ -160,7 +160,7 @@ function listIncomes(db, { dateFrom = null, dateTo = null } = {}) {
   if (dateTo) { conditions.push('i.date <= ?'); params.push(assertIsoDate(dateTo)); }
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   return db.prepare(`
-    SELECT i.id, i.doc_number, i.date, i.amount, i.description,
+    SELECT i.id, i.doc_number, i.date, i.amount, i.description, i.cancelled_at,
       c.name AS category_name, a.name AS activity_name, b.name AS cashbox_name
     FROM incomes i
     LEFT JOIN income_categories c ON c.id = i.category_id
@@ -168,6 +168,71 @@ function listIncomes(db, { dateFrom = null, dateTo = null } = {}) {
     LEFT JOIN cashboxes b ON b.id = i.cashbox_id
     ${where} ORDER BY i.date DESC, i.doc_number DESC LIMIT 500
   `).all(...params);
+}
+
+// الإلغاء لا يعدّل المستند ولا قيده: يُرحَّل قيد عكسي وحركة خزينة عكسية، ثم يُعلَّم القيد الأصلي بالعكس
+function cancelCashDocument(db, userId, kind, documentId, dateInput) {
+  const table = kind === 'expense' ? 'expenses' : 'incomes';
+  const id = String(documentId ?? '');
+  const doc = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(id);
+  if (!doc) throw new UserFacingError(kind === 'expense' ? 'المصروف غير موجود' : 'الإيراد غير موجود');
+  if (doc.cancelled_at) throw new UserFacingError('هذا المستند ملغى بالفعل');
+  const date = assertIsoDate(dateInput);
+  const originalEntry = db.prepare('SELECT id, status FROM journal_entries WHERE id = ?').get(doc.journal_entry_id);
+  if (!originalEntry || originalEntry.status !== 'posted') throw new UserFacingError('لا يمكن إلغاء هذا المستند');
+
+  return db.transaction(() => {
+    const box = requireActiveCashbox(db, doc.cashbox_id);
+    // الإيراد الملغى يُخرج نقدًا من الخزينة، فيجب ألا يتجاوز الرصيد المتاح
+    if (kind === 'income' && cashboxBalance(db, box.id) < doc.amount) {
+      throw new UserFacingError('رصيد الخزينة غير كافٍ لإلغاء هذا الإيراد');
+    }
+    const lines = db.prepare('SELECT account_id, debit, credit, description FROM journal_lines WHERE entry_id = ? ORDER BY rowid')
+      .all(doc.journal_entry_id);
+    const reversal = postJournalEntry(db, {
+      date,
+      description: `إلغاء ${doc.doc_number}`,
+      referenceType: `${kind}_cancel`,
+      referenceId: id,
+      activityId: null,
+      userId,
+      isReversing: true,
+      reversingOf: doc.journal_entry_id,
+      lines: lines.map((line) => ({
+        accountId: line.account_id,
+        debit: line.credit,
+        credit: line.debit,
+        description: `عكس — ${line.description ?? ''}`.trim(),
+      })),
+    });
+    db.prepare("UPDATE journal_entries SET status = 'reversed', updated_at = ? WHERE id = ?")
+      .run(new Date().toISOString(), doc.journal_entry_id);
+    insertCashTransaction(db, {
+      docNumber: `${doc.doc_number}-R`,
+      date,
+      type: kind === 'expense' ? 'receipt' : 'payment',
+      direction: kind === 'expense' ? 'in' : 'out',
+      cashboxId: box.id,
+      amount: doc.amount,
+      sourceType: `${kind}_cancel`,
+      sourceId: id,
+      description: `إلغاء ${doc.doc_number}`,
+      journalEntryId: reversal.id,
+      userId,
+    });
+    db.prepare(`UPDATE ${table} SET cancelled_at = ?, cancel_journal_entry_id = ? WHERE id = ?`)
+      .run(new Date().toISOString(), reversal.id, id);
+    audit(db, { userId, action: 'cancel', module: 'expenses', entityId: id, entityType: kind, details: { docNumber: doc.doc_number, reversedBy: reversal.entryNumber } });
+    return { id, reversalEntryNumber: reversal.entryNumber };
+  })();
+}
+
+function cancelExpense(db, userId, { expenseId, date }) {
+  return cancelCashDocument(db, userId, 'expense', expenseId, date);
+}
+
+function cancelIncome(db, userId, { incomeId, date }) {
+  return cancelCashDocument(db, userId, 'income', incomeId, date);
 }
 
 function expenseDistribution(db, expenseId) {
@@ -186,4 +251,6 @@ module.exports = {
   listExpenses,
   listIncomes,
   expenseDistribution,
+  cancelExpense,
+  cancelIncome,
 };

@@ -73,10 +73,12 @@ export interface DesktopApi {
       categories: () => Promise<{ expense: ExpenseCategoryOption[]; income: ExpenseCategoryOption[] }>;
       list: (args?: DateRangeArgs) => Promise<unknown[]>;
       create: (input: Record<string, unknown>) => Promise<{ id: string; docNumber: string; amount: number }>;
+      cancel: (input: { expenseId: string; date: string }) => Promise<{ id: string; reversalEntryNumber: string }>;
     };
     incomes: {
       list: (args?: DateRangeArgs) => Promise<unknown[]>;
       create: (input: Record<string, unknown>) => Promise<{ id: string; docNumber: string; amount: number }>;
+      cancel: (input: { incomeId: string; date: string }) => Promise<{ id: string; reversalEntryNumber: string }>;
     };
     treasury: {
       cashboxes: () => Promise<unknown[]>;
