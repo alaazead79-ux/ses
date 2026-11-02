@@ -206,6 +206,7 @@ export interface DesktopInvoiceItemRow {
   product_id: string | null;
   description: string;
   quantity_milli: number;
+  returned_milli: number;
   unit: string;
   unit_price: number;
   discount: number;

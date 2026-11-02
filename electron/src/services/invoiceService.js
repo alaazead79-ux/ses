@@ -200,6 +200,10 @@ function recordPayment(db, userId, input) {
   })();
 }
 
+function returnTypeFor(docType) {
+  return docType === 'sales' ? 'sales_return' : 'purchase_return';
+}
+
 function returnedQuantity(db, invoiceId, returnType, productId) {
   return db.prepare(`
     SELECT COALESCE(SUM(ri.quantity_milli), 0) AS qty
@@ -228,7 +232,10 @@ function createReturn(db, userId, input) {
     const soldTotal = invoiceItems.reduce((s, i) => s + i.total, 0);
     const soldCost = invoiceItems.reduce((s, i) => s + i.cost_total, 0);
     const alreadyReturned = returnedQuantity(db, invoice.id, returnType, productId);
-    if (alreadyReturned + quantityMilli > soldQty) throw new UserFacingError('الكمية المرتجعة تتجاوز الكمية في الفاتورة');
+    const remaining = soldQty - alreadyReturned;
+    if (quantityMilli > remaining) {
+      throw new UserFacingError(`الكمية المرتجعة تتجاوز المتبقي في الفاتورة (${remaining / 1000})`);
+    }
     return {
       productId,
       quantityMilli,
@@ -311,11 +318,17 @@ function listInvoices(db, docType) {
       i.paid_amount, i.total - i.paid_amount AS outstanding, i.payment_method, i.status, i.notes, p.name AS party_name
     FROM invoices i JOIN parties p ON p.id = i.party_id
     WHERE i.doc_type = ? ORDER BY i.date DESC, i.doc_number DESC LIMIT 200
-  `).all(docType).map((row) => ({ ...row, items: itemsStmt.all(row.id) }));
+  `).all(docType).map((row) => ({
+    ...row,
+    items: itemsStmt.all(row.id).map((item) => ({
+      ...item,
+      returned_milli: item.product_id ? returnedQuantity(db, row.id, returnTypeFor(row.doc_type), item.product_id) : 0,
+    })),
+  }));
 }
 
-// الإلغاء قيد عكسي لقيد الفاتورة: مبيعات تُعاد البضاعة بتكلفتها، ومشتريات تُصرف بالمتوسط الحالي
-// والفرق بين التكلفة الفعلية وقيمة الفاتورة يُرحَّل إلى مردودات المشتريات
+// الإلغاء قيد عكسي لقيد الفاتورة وكل سدادات عليها. البضاعة تعود (مبيعات) أو تُصرف (مشتريات).
+// المبيعات: النقد المسترد يُقيَّد بالرصيد الفعلي للخزينة، والباقي يبقى رصيدًا دائنًا للعميل ولا تُنشأ حركة نقدية سالبة.
 function cancelInvoice(db, userId, input) {
   const invoice = readPostedInvoice(db, input?.invoiceId);
   const date = assertIsoDate(input?.date);
@@ -324,25 +337,20 @@ function cancelInvoice(db, userId, input) {
   if (db.prepare('SELECT 1 FROM returns WHERE invoice_id = ? LIMIT 1').get(invoice.id)) {
     throw new UserFacingError('لا يمكن إلغاء فاتورة عليها مرتجعات');
   }
-  const extraPayment = db.prepare(
-    'SELECT 1 FROM payments WHERE invoice_id = ? AND (journal_entry_id IS NULL OR journal_entry_id != ?) LIMIT 1'
-  ).get(invoice.id, invoice.journal_entry_id);
-  if (extraPayment) throw new UserFacingError('لا يمكن إلغاء فاتورة عليها سدادات مسجلة بعد إصدارها');
-
   const originalEntry = db.prepare('SELECT status FROM journal_entries WHERE id = ?').get(invoice.journal_entry_id);
   if (!originalEntry || originalEntry.status !== 'posted') throw new UserFacingError('لا يمكن إلغاء هذه الفاتورة');
 
-  const initialPayment = invoice.paid_amount > 0
-    ? db.prepare('SELECT * FROM payments WHERE invoice_id = ? AND journal_entry_id = ?').get(invoice.id, invoice.journal_entry_id)
-    : null;
-  const box = initialPayment ? requireActiveCashbox(db, initialPayment.cashbox_id) : null;
-  if (box && isSales && cashboxBalance(db, box.id) < invoice.paid_amount) {
-    throw new UserFacingError('رصيد الخزينة غير كافٍ لإلغاء هذه الفاتورة');
-  }
-
+  const payments = db.prepare('SELECT * FROM payments WHERE invoice_id = ? ORDER BY rowid').all(invoice.id);
+  const availableCash = new Map();
+  const refunds = payments.map((payment) => {
+    const box = requireActiveCashbox(db, payment.cashbox_id);
+    if (!isSales) return { payment, box, refund: payment.amount, owed: 0 };
+    if (!availableCash.has(box.id)) availableCash.set(box.id, Math.max(0, cashboxBalance(db, box.id)));
+    const refund = Math.min(payment.amount, availableCash.get(box.id));
+    availableCash.set(box.id, availableCash.get(box.id) - refund);
+    return { payment, box, refund, owed: payment.amount - refund };
+  });
   const items = db.prepare('SELECT * FROM invoice_items WHERE invoice_id = ? ORDER BY rowid').all(invoice.id);
-  const originalLines = db.prepare('SELECT account_id, debit, credit, description FROM journal_lines WHERE entry_id = ? ORDER BY rowid')
-    .all(invoice.journal_entry_id);
 
   return db.transaction(() => {
     const cancelledAt = new Date().toISOString();
@@ -362,19 +370,24 @@ function cancelInvoice(db, userId, input) {
       }
     }
 
-    const reversal = originalLines.map((line) => ({
-      accountId: line.account_id,
-      debit: line.credit,
-      credit: line.debit,
-      description: `إلغاء — ${line.description ?? ''}`.trim(),
-    }));
-    if (!isSales) {
-      const inventoryLine = reversal.find((line) => line.accountId === 'acc_inventory');
-      inventoryLine.debit = 0;
-      inventoryLine.credit = stockValue;
+    const reversal = [];
+    if (isSales) {
+      reversal.push({ accountId: 'acc_sales', debit: invoice.total, credit: 0 }, { accountId: 'acc_ar', debit: 0, credit: invoice.total });
+      if (invoice.cost_total > 0) {
+        reversal.push({ accountId: 'acc_inventory', debit: invoice.cost_total, credit: 0 }, { accountId: 'acc_cogs', debit: 0, credit: invoice.cost_total });
+      }
+    } else {
+      reversal.push({ accountId: 'acc_ap', debit: invoice.total, credit: 0 }, { accountId: 'acc_inventory', debit: 0, credit: stockValue });
       const difference = invoice.total - stockValue;
       if (difference > 0) reversal.push({ accountId: 'acc_purchase_returns', debit: 0, credit: difference });
       if (difference < 0) reversal.push({ accountId: 'acc_purchase_returns', debit: -difference, credit: 0 });
+    }
+    for (const { payment, box, refund } of refunds) {
+      if (isSales) {
+        if (refund > 0) reversal.push({ accountId: box.account_id, debit: 0, credit: refund }, { accountId: 'acc_ar', debit: refund, credit: 0 });
+      } else {
+        reversal.push({ accountId: box.account_id, debit: payment.amount, credit: 0 }, { accountId: 'acc_ap', debit: 0, credit: payment.amount });
+      }
     }
 
     const entry = postJournalEntry(db, {
@@ -388,28 +401,40 @@ function cancelInvoice(db, userId, input) {
       reversingOf: invoice.journal_entry_id,
       lines: reversal.filter((line) => line.debit > 0 || line.credit > 0),
     });
-    db.prepare("UPDATE journal_entries SET status = 'reversed', updated_at = ? WHERE id = ?")
-      .run(cancelledAt, invoice.journal_entry_id);
 
-    if (initialPayment) {
-      insertCashTransaction(db, {
-        docNumber: `${invoice.doc_number}-R`,
-        date,
-        type: isSales ? 'payment' : 'receipt',
-        direction: isSales ? 'out' : 'in',
-        cashboxId: box.id,
-        amount: invoice.paid_amount,
-        sourceType: 'invoice_cancel',
-        sourceId: invoice.id,
-        description: `إلغاء ${invoice.doc_number}`,
-        journalEntryId: entry.id,
-        userId,
-      });
-      db.prepare(`
-        INSERT INTO party_transactions (id, party_id, date, type, reference_type, reference_id, debit, credit, description)
-        VALUES (?, ?, ?, 'payment', 'payment', ?, ?, ?, ?)
-      `).run(crypto.randomUUID(), invoice.party_id, date, initialPayment.id,
-        isSales ? invoice.paid_amount : 0, isSales ? 0 : invoice.paid_amount, `إلغاء ${invoice.doc_number}`);
+    const originalEntryIds = new Set([invoice.journal_entry_id, ...payments.map((p) => p.journal_entry_id).filter(Boolean)]);
+    for (const id of originalEntryIds) {
+      db.prepare("UPDATE journal_entries SET status = 'reversed', updated_at = ? WHERE id = ?").run(cancelledAt, id);
+    }
+
+    let refundedCash = 0;
+    let owedToCustomer = 0;
+    for (const { payment, box, refund, owed } of refunds) {
+      refundedCash += refund;
+      owedToCustomer += owed;
+      if (refund > 0) {
+        insertCashTransaction(db, {
+          docNumber: `${payment.doc_number}-R`,
+          date,
+          type: isSales ? 'payment' : 'receipt',
+          direction: isSales ? 'out' : 'in',
+          cashboxId: box.id,
+          amount: refund,
+          sourceType: 'invoice_cancel',
+          sourceId: invoice.id,
+          description: `إلغاء ${invoice.doc_number}`,
+          journalEntryId: entry.id,
+          userId,
+        });
+      }
+      const partyDebit = isSales ? refund : 0;
+      const partyCredit = isSales ? 0 : payment.amount;
+      if (partyDebit > 0 || partyCredit > 0) {
+        db.prepare(`
+          INSERT INTO party_transactions (id, party_id, date, type, reference_type, reference_id, debit, credit, description)
+          VALUES (?, ?, ?, 'payment', 'payment', ?, ?, ?, ?)
+        `).run(crypto.randomUUID(), invoice.party_id, date, payment.id, partyDebit, partyCredit, `إلغاء ${invoice.doc_number}`);
+      }
     }
     db.prepare(`
       INSERT INTO party_transactions (id, party_id, date, type, reference_type, reference_id, debit, credit, description)
@@ -421,9 +446,9 @@ function cancelInvoice(db, userId, input) {
       .run(cancelledAt, entry.id, cancelledAt, invoice.id);
     audit(db, {
       userId, action: 'cancel', module: 'sales', entityId: invoice.id, entityType: 'invoice',
-      details: { docNumber: invoice.doc_number, reversedBy: entry.entryNumber },
+      details: { docNumber: invoice.doc_number, reversedBy: entry.entryNumber, refundedCash, owedToCustomer },
     });
-    return { id: invoice.id, reversalEntryNumber: entry.entryNumber };
+    return { id: invoice.id, reversalEntryNumber: entry.entryNumber, refundedCash, owedToCustomer };
   })();
 }
 

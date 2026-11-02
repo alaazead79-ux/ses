@@ -188,3 +188,155 @@ test('cancelling a purchase issues stock at its average cost and keeps the entry
   const reversal = balancedReversal(created.data.id);
   assert.equal(reversal.d, reversal.c);
 });
+
+function booksBalanced() {
+  const row = db.prepare('SELECT COALESCE(SUM(debit), 0) AS d, COALESCE(SUM(credit), 0) AS c FROM journal_lines').get();
+  assert.equal(row.d, row.c);
+}
+
+function cashOf(cashboxId) {
+  return db.prepare(`
+    SELECT COALESCE(SUM(CASE WHEN direction = 'in' THEN amount ELSE -amount END), 0) AS bal
+    FROM cash_transactions WHERE cashbox_id = ?
+  `).get(cashboxId).bal;
+}
+
+function partyBalance(partyId) {
+  return db.prepare('SELECT COALESCE(SUM(debit - credit), 0) AS bal FROM party_transactions WHERE party_id = ?').get(partyId).bal;
+}
+
+test('a credit sale is returned in parts and refused beyond what remains', async () => {
+  const created = await invoke('invoices:create', {
+    docType: 'sales', date: '2024-02-01', partyId: customerId, paymentMethod: 'credit',
+    items: [{ productId, quantity: 3, unitPrice: 8000, discount: 0 }],
+  });
+  assert.equal(created.ok, true, created.error);
+  const paid = await invoke('invoices:pay', {
+    invoiceId: created.data.id, date: '2024-02-02', amount: 10000, method: 'cash', cashboxId: 'cashbox_main',
+  });
+  assert.equal(paid.ok, true, paid.error);
+
+  const first = await invoke('invoices:return', {
+    returnType: 'sales_return', invoiceId: created.data.id, date: '2024-02-03', items: [{ productId, quantity: 1 }],
+  });
+  assert.equal(first.ok, true, first.error);
+
+  const afterFirst = await invoke('invoices:list', { docType: 'sales' });
+  assert.equal(afterFirst.data[0].items[0].quantity_milli, 3000);
+  assert.equal(afterFirst.data[0].items[0].returned_milli, 1000);
+
+  const tooMuch = await invoke('invoices:return', {
+    returnType: 'sales_return', invoiceId: created.data.id, date: '2024-02-03', items: [{ productId, quantity: 2.5 }],
+  });
+  assert.equal(tooMuch.ok, false);
+  assert.match(tooMuch.error, /المتبقي في الفاتورة \(2\)/);
+
+  const second = await invoke('invoices:return', {
+    returnType: 'sales_return', invoiceId: created.data.id, date: '2024-02-04', items: [{ productId, quantity: 2 }],
+  });
+  assert.equal(second.ok, true, second.error);
+
+  const exhausted = await invoke('invoices:return', {
+    returnType: 'sales_return', invoiceId: created.data.id, date: '2024-02-05', items: [{ productId, quantity: 0.001 }],
+  });
+  assert.equal(exhausted.ok, false);
+  assert.match(exhausted.error, /المتبقي في الفاتورة \(0\)/);
+
+  const afterAll = await invoke('invoices:list', { docType: 'sales' });
+  assert.equal(afterAll.data[0].items[0].returned_milli, 3000);
+  const products = await invoke('products:list');
+  assert.equal(products.data[0].quantity_milli, 10000);
+  booksBalanced();
+});
+
+test('an invoice with returns cannot be cancelled', async () => {
+  const created = await invoke('invoices:create', {
+    docType: 'sales', date: '2024-02-01', partyId: customerId, paymentMethod: 'credit',
+    items: [{ productId, quantity: 1, unitPrice: 8000, discount: 0 }],
+  });
+  await invoke('invoices:return', {
+    returnType: 'sales_return', invoiceId: created.data.id, date: '2024-02-02', items: [{ productId, quantity: 1 }],
+  });
+  const cancelled = await invoke('invoices:cancel', { invoiceId: created.data.id, date: '2024-02-03' });
+  assert.equal(cancelled.ok, false);
+  assert.match(cancelled.error, /مرتجعات/);
+});
+
+test('cancelling a sale reverses a later payment and leaves no customer balance', async () => {
+  const created = await invoke('invoices:create', {
+    docType: 'sales', date: '2024-02-01', partyId: customerId, paymentMethod: 'credit',
+    items: [{ productId, quantity: 2, unitPrice: 8000, discount: 0 }],
+  });
+  const paid = await invoke('invoices:pay', {
+    invoiceId: created.data.id, date: '2024-02-02', amount: 5000, method: 'cash', cashboxId: 'cashbox_main',
+  });
+  assert.equal(paid.ok, true, paid.error);
+
+  const cancelled = await invoke('invoices:cancel', { invoiceId: created.data.id, date: '2024-02-03' });
+  assert.equal(cancelled.ok, true, cancelled.error);
+  assert.equal(cancelled.data.refundedCash, 5000);
+  assert.equal(cancelled.data.owedToCustomer, 0);
+  assert.equal(cashOf('cashbox_main'), 0);
+  assert.equal(partyBalance(customerId), 0);
+  booksBalanced();
+});
+
+test('cancelling a sale whose cash was already spent owes the customer instead of going negative', async () => {
+  const supplierId = parties.createParty(db, null, { name: 'مورد نقدي', type: 'supplier' }).id;
+  const created = await invoke('invoices:create', {
+    docType: 'sales', date: '2024-02-01', partyId: customerId, paymentMethod: 'cash', cashboxId: 'cashbox_main',
+    paidNow: 6000, items: [{ productId, quantity: 2, unitPrice: 8000, discount: 0 }],
+  });
+  assert.equal(created.ok, true, created.error);
+  const spent = await invoke('invoices:create', {
+    docType: 'purchase', date: '2024-02-01', partyId: supplierId, paymentMethod: 'cash', cashboxId: 'cashbox_main',
+    paidNow: 6000, items: [{ productId, quantity: 1, unitPrice: 6000, discount: 0 }],
+  });
+  assert.equal(spent.ok, true, spent.error);
+  assert.equal(cashOf('cashbox_main'), 0);
+
+  const cancelled = await invoke('invoices:cancel', { invoiceId: created.data.id, date: '2024-02-02' });
+  assert.equal(cancelled.ok, true, cancelled.error);
+  assert.equal(cancelled.data.refundedCash, 0);
+  assert.equal(cancelled.data.owedToCustomer, 6000);
+  assert.equal(cashOf('cashbox_main'), 0);
+  assert.equal(partyBalance(customerId), -6000);
+  booksBalanced();
+});
+
+test('cancelling a sale refunds the cash still on hand and owes the rest', async () => {
+  const supplierId = parties.createParty(db, null, { name: 'مورد جزئي', type: 'supplier' }).id;
+  const created = await invoke('invoices:create', {
+    docType: 'sales', date: '2024-02-01', partyId: customerId, paymentMethod: 'cash', cashboxId: 'cashbox_main',
+    paidNow: 6000, items: [{ productId, quantity: 2, unitPrice: 8000, discount: 0 }],
+  });
+  await invoke('invoices:create', {
+    docType: 'purchase', date: '2024-02-01', partyId: supplierId, paymentMethod: 'cash', cashboxId: 'cashbox_main',
+    paidNow: 4000, items: [{ productId, quantity: 1, unitPrice: 4000, discount: 0 }],
+  });
+  assert.equal(cashOf('cashbox_main'), 2000);
+
+  const cancelled = await invoke('invoices:cancel', { invoiceId: created.data.id, date: '2024-02-02' });
+  assert.equal(cancelled.ok, true, cancelled.error);
+  assert.equal(cancelled.data.refundedCash, 2000);
+  assert.equal(cancelled.data.owedToCustomer, 4000);
+  assert.equal(cashOf('cashbox_main'), 0);
+  assert.equal(partyBalance(customerId), -4000);
+  booksBalanced();
+});
+
+test('cancelling a cash purchase returns the cash paid to the supplier', async () => {
+  const supplierId = parties.createParty(db, null, { name: 'مورد نقدي ثانٍ', type: 'supplier' }).id;
+  const created = await invoke('invoices:create', {
+    docType: 'purchase', date: '2024-02-01', partyId: supplierId, paymentMethod: 'cash', cashboxId: 'cashbox_main',
+    paidNow: 6000, items: [{ productId, quantity: 1, unitPrice: 6000, discount: 0 }],
+  });
+  assert.equal(created.ok, true, created.error);
+  assert.equal(cashOf('cashbox_main'), -6000);
+
+  const cancelled = await invoke('invoices:cancel', { invoiceId: created.data.id, date: '2024-02-02' });
+  assert.equal(cancelled.ok, true, cancelled.error);
+  assert.equal(cashOf('cashbox_main'), 0);
+  assert.equal(partyBalance(supplierId), 0);
+  booksBalanced();
+});

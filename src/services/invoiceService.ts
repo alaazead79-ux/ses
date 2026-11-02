@@ -32,6 +32,7 @@ export interface InvoiceItem {
   product_id: string | null;
   description: string | null;
   quantity: number;
+  returnedQuantity?: number;
   unit: string | null;
   unit_price: number;
   discount: number;
@@ -60,6 +61,7 @@ function fromDesktopItem(item: DesktopInvoiceItemRow): InvoiceItem {
     product_id: item.product_id,
     description: item.description,
     quantity: item.quantity_milli / 1000,
+    returnedQuantity: item.returned_milli / 1000,
     unit: item.unit,
     unit_price: item.unit_price,
     discount: item.discount,
