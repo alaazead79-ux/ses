@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const { hashPassword, verifyPassword } = require('./passwords');
 const { ROLE_PERMISSIONS } = require('./rolePermissions');
 const { UserFacingError } = require('../errors');
+const { audit: writeAudit, nowIso } = require('../domain/audit');
 
 const ASSIGNABLE_ROLES = ['manager', 'accountant', 'user'];
 const USERNAME_PATTERN = /^[A-Za-z0-9._-]{3,32}$/;
@@ -17,10 +18,6 @@ const INACTIVE_ACCOUNT = 'هذا الحساب معطّل. تواصل مع الم
 const USER_SELECT = `
   SELECT u.id, u.username, u.display_name, u.password_hash, u.role_id, u.is_active, u.created_at, r.label AS role_label
   FROM users u JOIN roles r ON r.id = u.role_id`;
-
-function nowIso() {
-  return new Date().toISOString();
-}
 
 function validateUsername(value) {
   const username = String(value ?? '').trim();
@@ -111,18 +108,7 @@ function createAuthService(db, { clock = () => Date.now() } = {}) {
   }
 
   function audit({ userId, action, module, entityId, details }) {
-    db.prepare(`
-      INSERT INTO audit_logs (user_id, action, module, entity_id, entity_type, details, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      userId ?? null,
-      action,
-      module,
-      entityId ?? null,
-      entityId ? 'user' : null,
-      details ? JSON.stringify(details) : null,
-      nowIso(),
-    );
+    writeAudit(db, { userId, action, module, entityId, entityType: 'user', details });
   }
 
   function activeUserForSession(sessionKey) {

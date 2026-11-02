@@ -2,6 +2,9 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const { openDatabase, getSchemaVersion, createBackup } = require('./db/database');
 const { createAuthService } = require('./auth/authService');
+const { registerFarmHandlers } = require('./ipc/farmHandlers');
+const { restoreBackup } = require('./services/backupService');
+const { UserFacingError } = require('./errors');
 const { registerAuthHandlers } = require('./ipc/authHandlers');
 const { handleSafely } = require('./ipc/handleSafely');
 
@@ -29,6 +32,7 @@ function createWindow() {
 
 function registerIpcHandlers() {
   registerAuthHandlers(ipcMain, auth);
+  registerFarmHandlers(ipcMain, auth, () => database.db, () => database.backupDir);
 
   handleSafely(ipcMain, 'db:status', (key) => {
     auth.requireUser(key);
@@ -39,6 +43,21 @@ function registerIpcHandlers() {
     auth.requirePermission(key, 'backup.create');
     const backupPath = await createBackup(database.db, database.backupDir);
     return { path: backupPath };
+  });
+
+  handleSafely(ipcMain, 'backup:restore', async (key, payload) => {
+    auth.requirePermission(key, 'backup.restore');
+    if (typeof payload?.filename !== 'string' || payload.filename.length === 0) {
+      throw new UserFacingError('اختر ملف النسخة الاحتياطية');
+    }
+    await restoreBackup(database.db, {
+      liveFilePath: database.filePath,
+      backupDir: database.backupDir,
+      backupFilePath: path.join(database.backupDir, path.basename(payload.filename)),
+    });
+    app.relaunch();
+    app.exit(0);
+    return { restarting: true };
   });
 }
 

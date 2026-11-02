@@ -68,6 +68,65 @@ export interface DesktopApi {
     create: (input: CreateUserInput) => Promise<void>;
     update: (id: string, changes: UpdateUserChanges) => Promise<void>;
   };
+  farm: {
+    expenses: {
+      categories: () => Promise<{ expense: ExpenseCategoryOption[]; income: ExpenseCategoryOption[] }>;
+      list: (args?: DateRangeArgs) => Promise<unknown[]>;
+      create: (input: Record<string, unknown>) => Promise<{ id: string; docNumber: string; amount: number }>;
+    };
+    incomes: {
+      list: (args?: DateRangeArgs) => Promise<unknown[]>;
+      create: (input: Record<string, unknown>) => Promise<{ id: string; docNumber: string; amount: number }>;
+    };
+    treasury: {
+      cashboxes: () => Promise<unknown[]>;
+      createCashbox: (input: Record<string, unknown>) => Promise<{ id: string }>;
+      statement: (args: Record<string, unknown>) => Promise<unknown>;
+      transfers: () => Promise<unknown[]>;
+      createTransfer: (input: Record<string, unknown>) => Promise<unknown>;
+      checks: () => Promise<unknown[]>;
+      createCheck: (input: Record<string, unknown>) => Promise<unknown>;
+    };
+    employees: {
+      list: () => Promise<unknown[]>;
+      create: (input: Record<string, unknown>) => Promise<{ id: string }>;
+      attendance: (args: { month: string }) => Promise<unknown[]>;
+      recordAttendance: (input: Record<string, unknown>) => Promise<void>;
+      advances: (args?: { employeeId?: string | null }) => Promise<unknown[]>;
+      createAdvance: (input: Record<string, unknown>) => Promise<{ id: string; docNumber: string }>;
+      salaries: (args: { month: string }) => Promise<unknown[]>;
+      createSalary: (input: Record<string, unknown>) => Promise<{ id: string; docNumber: string; net: number; advanceDeduct: number }>;
+      paySalary: (input: Record<string, unknown>) => Promise<{ id: string }>;
+    };
+    dashboard: {
+      summary: (args: { asOf: string }) => Promise<DashboardSummary>;
+    };
+    backups: {
+      list: () => Promise<{ filename: string; size: number; createdAt: string }[]>;
+      restore: (filename: string) => Promise<{ restarting: boolean }>;
+    };
+  };
+}
+
+export interface ExpenseCategoryOption {
+  id: string;
+  name: string;
+  account_id: string | null;
+}
+
+export interface DateRangeArgs {
+  dateFrom?: string | null;
+  dateTo?: string | null;
+}
+
+export interface DashboardSummary {
+  asOf: string;
+  cashOnHand: number;
+  receivables: number;
+  payables: number;
+  stockValue: number;
+  lowStockCount: number;
+  monthProfit: number;
 }
 
 declare global {

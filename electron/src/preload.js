@@ -28,4 +28,42 @@ contextBridge.exposeInMainWorld('electronAPI', {
     create: (input) => invoke('users:create', input),
     update: (id, changes) => invoke('users:update', { id, changes }),
   },
+  farm: {
+    expenses: {
+      categories: () => invoke('expenses:categories'),
+      list: (args) => invoke('expenses:list', args),
+      create: (input) => invoke('expenses:create', input),
+    },
+    incomes: {
+      list: (args) => invoke('incomes:list', args),
+      create: (input) => invoke('incomes:create', input),
+    },
+    treasury: {
+      cashboxes: () => invoke('treasury:cashboxes'),
+      createCashbox: (input) => invoke('treasury:createCashbox', input),
+      statement: (args) => invoke('treasury:statement', args),
+      transfers: () => invoke('transfers:list'),
+      createTransfer: (input) => invoke('transfers:create', input),
+      checks: () => invoke('checks:list'),
+      createCheck: (input) => invoke('checks:create', input),
+    },
+    employees: {
+      list: () => invoke('employees:list'),
+      create: (input) => invoke('employees:create', input),
+      attendance: (args) => invoke('employees:attendance', args),
+      recordAttendance: (input) => invoke('employees:recordAttendance', input),
+      advances: (args) => invoke('employees:advances', args),
+      createAdvance: (input) => invoke('employees:createAdvance', input),
+      salaries: (args) => invoke('employees:salaries', args),
+      createSalary: (input) => invoke('employees:createSalary', input),
+      paySalary: (input) => invoke('employees:paySalary', input),
+    },
+    dashboard: {
+      summary: (args) => invoke('dashboard:summary', args),
+    },
+    backups: {
+      list: () => invoke('backup:list'),
+      restore: (filename) => invoke('backup:restore', { filename }),
+    },
+  },
 });
