@@ -1,4 +1,9 @@
 import { getDb, toCents } from '@/db/db';
+import {
+  getDesktopApi,
+  type DesktopInvoiceItemRow,
+  type DesktopInvoiceRow,
+} from '@/lib/electronBridge';
 import { createJournalEntry, nextDocNumber } from './accountingService';
 import { recordPartyTransaction } from './partyService';
 
@@ -43,7 +48,52 @@ const ACCOUNT_IDS = {
   inventory: 'acc_inventory',
 };
 
+function toPiastres(pounds: number): number {
+  return Math.round(pounds * 100);
+}
+
+function fromDesktopItem(item: DesktopInvoiceItemRow): InvoiceItem {
+  return {
+    id: item.id,
+    invoice_id: item.invoice_id,
+    product_id: item.product_id,
+    description: item.description,
+    quantity: item.quantity_milli / 1000,
+    unit: item.unit,
+    unit_price: item.unit_price,
+    discount: item.discount,
+    total: item.total,
+  };
+}
+
+function fromDesktopInvoice(row: DesktopInvoiceRow): Invoice {
+  return {
+    id: row.id,
+    doc_number: row.doc_number,
+    date: row.date,
+    doc_type: row.doc_type,
+    party_id: row.party_id,
+    party_name: row.party_name,
+    activity_id: row.activity_id,
+    payment_method: row.payment_method,
+    status: row.status,
+    subtotal: row.subtotal,
+    discount: row.discount,
+    total: row.total,
+    paid_amount: row.paid_amount,
+    notes: row.notes,
+    items: row.items.map(fromDesktopItem),
+  };
+}
+
 export async function listInvoices(docType?: string): Promise<Invoice[]> {
+  const desktop = getDesktopApi();
+  if (desktop) {
+    const types = docType ? [docType] : ['sales', 'purchase'];
+    const lists = await Promise.all(types.map((type) => desktop.farm.invoices.list({ docType: type as 'sales' | 'purchase' })));
+    return lists.flat().map(fromDesktopInvoice).sort((a, b) => (a.date === b.date ? b.doc_number.localeCompare(a.doc_number) : b.date.localeCompare(a.date)));
+  }
+
   const db = await getDb();
   let query = `
     SELECT i.id, i.doc_number, i.date::text, i.doc_type, i.party_id, p.name as party_name,
@@ -76,11 +126,34 @@ export async function createInvoice(data: {
   partyId: string;
   activityId?: string | null;
   paymentMethod: string;
-  items: { description: string; quantity: number; unit: string; unitPrice: number; discount: number }[];
+  items: { productId?: string; description: string; quantity: number; unit: string; unitPrice: number; discount: number }[];
   discount: number;
   notes?: string;
   createdBy?: string | null;
+  cashboxId?: string;
+  paidNow?: number;
 }): Promise<{ id: string; docNumber: string }> {
+  const desktop = getDesktopApi();
+  if (desktop) {
+    if (data.docType !== 'sales' && data.docType !== 'purchase') throw new Error('المرتجع يُسجَّل من الفاتورة الأصلية');
+    const result = await desktop.farm.invoices.create({
+      docType: data.docType,
+      date: data.date,
+      partyId: data.partyId,
+      activityId: data.activityId ?? null,
+      paymentMethod: data.paymentMethod,
+      cashboxId: data.cashboxId,
+      paidNow: data.paidNow === undefined ? undefined : toPiastres(data.paidNow),
+      discount: toPiastres(data.discount),
+      notes: data.notes,
+      items: data.items.map((item) => {
+        if (!item.productId) throw new Error('اختر الصنف من المخزون لكل بند');
+        return { productId: item.productId, quantity: item.quantity, unitPrice: toPiastres(item.unitPrice), discount: toPiastres(item.discount) };
+      }),
+    });
+    return { id: result.id, docNumber: result.docNumber };
+  }
+
   const db = await getDb();
 
   // حساب الإجماليات (بالجنيه)
@@ -156,8 +229,31 @@ export async function createInvoice(data: {
   return { id: invoiceId, docNumber };
 }
 
+export interface ReturnInput {
+  invoice: Invoice;
+  date: string;
+  reason?: string;
+  items: { productId: string; quantity: number }[];
+}
+
+export async function createReturn(input: ReturnInput): Promise<{ id: string; docNumber: string }> {
+  const desktop = getDesktopApi();
+  if (!desktop) throw new Error('المرتجعات متاحة من تطبيق سطح المكتب فقط');
+  const { invoice } = input;
+  if (invoice.doc_type !== 'sales' && invoice.doc_type !== 'purchase') throw new Error('نوع الفاتورة لا يقبل مرتجعًا');
+  const result = await desktop.farm.invoices.return({
+    returnType: invoice.doc_type === 'sales' ? 'sales_return' : 'purchase_return',
+    invoiceId: invoice.id,
+    date: input.date,
+    reason: input.reason,
+    items: input.items,
+  });
+  return { id: result.id, docNumber: result.docNumber };
+}
+
 export async function recordPayment(data: {
   invoiceId?: string;
+  cashboxId?: string;
   partyId: string;
   date: string;
   amount: number;
@@ -166,6 +262,20 @@ export async function recordPayment(data: {
   description?: string;
   createdBy?: string | null;
 }): Promise<void> {
+  const desktop = getDesktopApi();
+  if (desktop) {
+    if (!data.invoiceId) throw new Error('اختر الفاتورة المراد سدادها');
+    if (!data.cashboxId) throw new Error('اختر الخزينة');
+    await desktop.farm.invoices.pay({
+      invoiceId: data.invoiceId,
+      date: data.date,
+      amount: toPiastres(data.amount),
+      method: data.paymentMethod === 'transfer' ? 'transfer' : 'cash',
+      cashboxId: data.cashboxId,
+    });
+    return;
+  }
+
   const db = await getDb();
   const docNumber = await nextDocNumber('payment');
   const amountCents = toCents(data.amount);

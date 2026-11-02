@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { getDb } from '@/db/db';
+import { getDesktopApi } from '@/lib/electronBridge';
 
 interface UseDbInitResult {
   ready: boolean;
@@ -8,10 +9,11 @@ interface UseDbInitResult {
 
 /** يقوم بتهيئة قاعدة البيانات عند بدء التشغيل */
 export function useDbInit(): UseDbInitResult {
-  const [ready, setReady] = useState(false);
+  const [ready, setReady] = useState(() => getDesktopApi() !== null);
   const [error, setError] = useState<string | null>(null);
 
   const init = useCallback(async () => {
+    if (getDesktopApi()) return;
     try {
       await getDb();
       setReady(true);

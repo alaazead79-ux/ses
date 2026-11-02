@@ -5,6 +5,8 @@ const accounting = require('../services/accountingService');
 const payroll = require('../services/payrollService');
 const treasury = require('../services/treasuryService');
 const backups = require('../services/backupService');
+const invoices = require('../services/invoiceService');
+const inventory = require('../services/inventoryService');
 const { dashboardSummary } = require('../services/dashboardService');
 
 // كل قناة تستدعي دالة خدمة واحدة بعد التحقق من صلاحية محددة. المعرّف يأتي من الجلسة فقط
@@ -43,6 +45,13 @@ function farmChannels() {
     ['employees:salaries', 'employees.view', (db, _uid, args) => payroll.listSalaries(db, args)],
     ['employees:createSalary', 'employees.add', (db, uid, input) => payroll.createSalary(db, uid, input)],
     ['employees:paySalary', 'employees.edit', (db, uid, input) => payroll.paySalary(db, uid, input)],
+
+    ['products:list', 'inventory.view', (db) => inventory.listProducts(db)],
+    ['invoices:list', 'sales.view', (db, _uid, args) => invoices.listInvoices(db, args?.docType)],
+    ['invoices:create', 'sales.add', (db, uid, input) => invoices.createInvoice(db, uid, input)],
+    ['invoices:pay', 'sales.add', (db, uid, input) => invoices.recordPayment(db, uid, input)],
+    ['invoices:return', 'sales.add', (db, uid, input) => invoices.createReturn(db, uid, input)],
+    ['invoices:cancel', 'sales.edit', (db, uid, input) => invoices.cancelInvoice(db, uid, input)],
 
     ['dashboard:summary', 'dashboard.view', (db, _uid, args) => dashboardSummary(db, args)],
   ];

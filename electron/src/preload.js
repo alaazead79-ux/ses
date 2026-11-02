@@ -49,6 +49,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     activities: {
       list: () => invoke('activities:list'),
     },
+    products: {
+      list: () => invoke('products:list'),
+    },
+    invoices: {
+      list: (args) => invoke('invoices:list', args),
+      create: (input) => invoke('invoices:create', input),
+      pay: (input) => invoke('invoices:pay', input),
+      return: (input) => invoke('invoices:return', input),
+      cancel: (input) => invoke('invoices:cancel', input),
+    },
     treasury: {
       createCashbox: (input) => invoke('treasury:createCashbox', input),
       statement: (args) => invoke('treasury:statement', args),

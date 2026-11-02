@@ -89,6 +89,16 @@ export interface DesktopApi {
     activities: {
       list: () => Promise<DesktopActivityRow[]>;
     };
+    products: {
+      list: () => Promise<DesktopProductRow[]>;
+    };
+    invoices: {
+      list: (args: { docType: 'sales' | 'purchase' }) => Promise<DesktopInvoiceRow[]>;
+      create: (input: Record<string, unknown>) => Promise<{ id: string; docNumber: string; total: number; paidAmount: number }>;
+      pay: (input: Record<string, unknown>) => Promise<{ id: string; docNumber: string }>;
+      return: (input: Record<string, unknown>) => Promise<{ id: string; docNumber: string; total: number; cost: number }>;
+      cancel: (input: { invoiceId: string; date: string }) => Promise<{ id: string; reversalEntryNumber: string }>;
+    };
     treasury: {
       cashboxes: () => Promise<unknown[]>;
       createCashbox: (input: Record<string, unknown>) => Promise<{ id: string }>;
@@ -174,6 +184,51 @@ export interface DesktopPartyStatement {
     debit: number;
     credit: number;
   }[];
+}
+
+export interface DesktopProductRow {
+  id: string;
+  name: string;
+  sku: string | null;
+  category: string | null;
+  unit: string;
+  reorder_level_milli: number;
+  quantity_milli: number;
+  total_value: number;
+  unit_cost: number;
+  is_active: boolean;
+  is_low_stock: boolean;
+}
+
+export interface DesktopInvoiceItemRow {
+  id: string;
+  invoice_id: string;
+  product_id: string | null;
+  description: string;
+  quantity_milli: number;
+  unit: string;
+  unit_price: number;
+  discount: number;
+  total: number;
+}
+
+export interface DesktopInvoiceRow {
+  id: string;
+  doc_number: string;
+  date: string;
+  doc_type: 'sales' | 'purchase';
+  party_id: string;
+  activity_id: string | null;
+  subtotal: number;
+  discount: number;
+  total: number;
+  paid_amount: number;
+  outstanding: number;
+  payment_method: string;
+  status: string;
+  notes: string | null;
+  party_name: string;
+  items: DesktopInvoiceItemRow[];
 }
 
 export interface DesktopActivityRow {

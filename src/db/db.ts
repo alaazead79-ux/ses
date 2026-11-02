@@ -1,4 +1,5 @@
 import { PGlite } from '@electric-sql/pglite';
+import { getDesktopApi } from '@/lib/electronBridge';
 
 /**
  * Database manager — طبقة قاعدة البيانات
@@ -35,6 +36,7 @@ async function loadMigrations(): Promise<{ id: string; sql: string }[]> {
 }
 
 export async function getDb(): Promise<PGlite> {
+  if (getDesktopApi()) throw new Error('قاعدة المتصفح غير متاحة في تطبيق سطح المكتب');
   if (dbInstance) return dbInstance;
   if (initPromise) return initPromise;
 
