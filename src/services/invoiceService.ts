@@ -6,6 +6,7 @@ import {
 } from '@/lib/electronBridge';
 import { createJournalEntry, nextDocNumber } from './accountingService';
 import { recordPartyTransaction } from './partyService';
+import { listProducts } from './inventoryService';
 
 export interface Invoice {
   id: string;
@@ -312,6 +313,42 @@ export async function recordPayment(data: {
     credit: data.direction === 'inbound' ? data.amount : 0,
     description: data.description ?? `سداد ${docNumber}`,
   });
+}
+
+export interface SellableProduct {
+  id: string;
+  name: string;
+  unit: string;
+  quantity: number;
+}
+
+export interface CashboxOption {
+  id: string;
+  name: string;
+  balance: number;
+}
+
+export async function listSellableProducts(): Promise<SellableProduct[]> {
+  const desktop = getDesktopApi();
+  if (desktop) {
+    const rows = await desktop.farm.products.list();
+    return rows.map((row) => ({ id: row.id, name: row.name, unit: row.unit, quantity: row.quantity_milli / 1000 }));
+  }
+  const products = await listProducts();
+  return products.map((p) => ({ id: p.id, name: p.name, unit: p.unit, quantity: p.quantity }));
+}
+
+export async function listCashboxOptions(): Promise<CashboxOption[]> {
+  const desktop = getDesktopApi();
+  if (!desktop) return [];
+  const rows = await desktop.farm.treasury.cashboxes() as { id: string; name: string; balance: number; is_active: boolean }[];
+  return rows.filter((box) => box.is_active).map((box) => ({ id: box.id, name: box.name, balance: box.balance }));
+}
+
+export async function cancelInvoice(invoiceId: string, date: string): Promise<{ id: string; reversalEntryNumber: string }> {
+  const desktop = getDesktopApi();
+  if (!desktop) throw new Error('إلغاء الفواتير متاح من تطبيق سطح المكتب فقط');
+  return desktop.farm.invoices.cancel({ invoiceId, date });
 }
 
 function docTypeLabel(type: string): string {
