@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Receipt, Plus, Eye } from 'lucide-react';
+import { Receipt, Plus, Eye, Wallet } from 'lucide-react';
 import PageHeader from '@/components/ui/PageHeader';
 import EmptyState from '@/components/ui/EmptyState';
 import Badge from '@/components/ui/Badge';
@@ -8,12 +8,15 @@ import { formatEGP, formatShortDate } from '@/lib/format';
 import { listInvoices, type Invoice } from '@/services/invoiceService';
 import InvoiceFormModal from '@/components/sales/InvoiceFormModal';
 import InvoiceViewModal from '@/components/sales/InvoiceViewModal';
+import CustomerRefundModal from '@/components/sales/CustomerRefundModal';
 import { DOC_TYPE_LABELS, DOC_TYPE_TONES } from '@/components/sales/invoiceLabels';
+import { getDesktopApi } from '@/lib/electronBridge';
 
 export default function SalesPage() {
   const { hasPermission } = useSession();
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [showModal, setShowModal] = useState(false);
+  const [showRefund, setShowRefund] = useState(false);
   const [viewInvoiceId, setViewInvoiceId] = useState<string | null>(null);
 
   const load = useCallback(() => listInvoices().then(setInvoices), []);
@@ -21,11 +24,17 @@ export default function SalesPage() {
 
   const viewInvoice = invoices.find((inv) => inv.id === viewInvoiceId) ?? null;
   const canAdd = hasPermission('sales.add');
+  const canRefundCredit = hasPermission('treasury.add') && getDesktopApi() !== null;
 
   return (
     <div>
       <PageHeader title="المبيعات والمشتريات" subtitle="فواتير المبيعات والمشتريات والمرتجعات والمدفوعات" icon={Receipt}
-        actions={canAdd ? <button onClick={() => setShowModal(true)} className="btn-primary"><Plus className="h-4 w-4" /> فاتورة جديدة</button> : undefined}
+        actions={(
+          <div className="flex gap-2">
+            {canRefundCredit && <button onClick={() => setShowRefund(true)} className="btn-secondary"><Wallet className="h-4 w-4" /> رد رصيد عميل</button>}
+            {canAdd && <button onClick={() => setShowModal(true)} className="btn-primary"><Plus className="h-4 w-4" /> فاتورة جديدة</button>}
+          </div>
+        )}
       />
       <div className="card overflow-hidden">
         {invoices.length === 0 ? (
@@ -74,6 +83,12 @@ export default function SalesPage() {
         )}
       </div>
       {showModal && <InvoiceFormModal onClose={() => setShowModal(false)} onSaved={load} />}
+      {showRefund && (
+        <CustomerRefundModal
+          onClose={() => setShowRefund(false)}
+          onDone={() => { setShowRefund(false); load(); }}
+        />
+      )}
       {viewInvoice && (
         <InvoiceViewModal
           invoice={viewInvoice}

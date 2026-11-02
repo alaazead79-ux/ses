@@ -249,7 +249,63 @@ test('a credit sale is returned in parts and refused beyond what remains', async
   booksBalanced();
 });
 
-test('an invoice with returns cannot be cancelled', async () => {
+function accountNet(accountId) {
+  return db.prepare('SELECT COALESCE(SUM(debit - credit), 0) AS bal FROM journal_lines WHERE account_id = ?').get(accountId).bal;
+}
+
+async function stockOf() {
+  return (await invoke('products:list')).data[0].quantity_milli;
+}
+
+test('cancelling a sale after a partial return reverses only the remaining quantity and cash', async () => {
+  const created = await invoke('invoices:create', {
+    docType: 'sales', date: '2024-02-01', partyId: customerId, paymentMethod: 'cash', cashboxId: 'cashbox_main',
+    paidNow: 10000, items: [{ productId, quantity: 3, unitPrice: 8000, discount: 0 }],
+  });
+  assert.equal(created.ok, true, created.error);
+  const returned = await invoke('invoices:return', {
+    returnType: 'sales_return', invoiceId: created.data.id, date: '2024-02-02', items: [{ productId, quantity: 1 }],
+  });
+  assert.equal(returned.ok, true, returned.error);
+  assert.equal(partyBalance(customerId), 6000);
+
+  const cancelled = await invoke('invoices:cancel', { invoiceId: created.data.id, date: '2024-02-03' });
+  assert.equal(cancelled.ok, true, cancelled.error);
+  assert.equal(cancelled.data.refundedCash, 10000);
+  assert.equal(cancelled.data.owedToCustomer, 0);
+  assert.equal(await stockOf(), 10000);
+  assert.equal(cashOf('cashbox_main'), 0);
+  assert.equal(partyBalance(customerId), 0);
+  assert.equal(accountNet('acc_ar'), 0);
+  assert.equal(accountNet('acc_sales') + accountNet('acc_sales_returns'), 0);
+  assert.equal(accountNet('acc_cogs'), 0);
+  assert.equal(balancedReversal(created.data.id).d, 36000);
+  booksBalanced();
+});
+
+test('cancelling a sale after a full return refunds the cash paid and leaves no balance', async () => {
+  const created = await invoke('invoices:create', {
+    docType: 'sales', date: '2024-02-01', partyId: customerId, paymentMethod: 'cash', cashboxId: 'cashbox_main',
+    paidNow: 8000, items: [{ productId, quantity: 1, unitPrice: 8000, discount: 0 }],
+  });
+  await invoke('invoices:return', {
+    returnType: 'sales_return', invoiceId: created.data.id, date: '2024-02-02', items: [{ productId, quantity: 1 }],
+  });
+
+  const cancelled = await invoke('invoices:cancel', { invoiceId: created.data.id, date: '2024-02-03' });
+  assert.equal(cancelled.ok, true, cancelled.error);
+  assert.equal(cancelled.data.refundedCash, 8000);
+  assert.equal(cancelled.data.owedToCustomer, 0);
+  assert.equal(await stockOf(), 10000);
+  assert.equal(cashOf('cashbox_main'), 0);
+  assert.equal(partyBalance(customerId), 0);
+  assert.equal(accountNet('acc_ar'), 0);
+  assert.equal(accountNet('acc_sales') + accountNet('acc_sales_returns'), 0);
+  assert.equal(accountNet('acc_cogs'), 0);
+  booksBalanced();
+});
+
+test('cancelling a credit sale after a full return posts no new entry and leaves no balance', async () => {
   const created = await invoke('invoices:create', {
     docType: 'sales', date: '2024-02-01', partyId: customerId, paymentMethod: 'credit',
     items: [{ productId, quantity: 1, unitPrice: 8000, discount: 0 }],
@@ -257,9 +313,151 @@ test('an invoice with returns cannot be cancelled', async () => {
   await invoke('invoices:return', {
     returnType: 'sales_return', invoiceId: created.data.id, date: '2024-02-02', items: [{ productId, quantity: 1 }],
   });
+
+  const cancelled = await invoke('invoices:cancel', { invoiceId: created.data.id, date: '2024-02-03' });
+  assert.equal(cancelled.ok, true, cancelled.error);
+  assert.equal(cancelled.data.reversalEntryNumber, null);
+  assert.equal(cancelled.data.refundedCash, 0);
+  assert.equal(cancelled.data.owedToCustomer, 0);
+  assert.equal(await stockOf(), 10000);
+  assert.equal(partyBalance(customerId), 0);
+  assert.equal(accountNet('acc_ar'), 0);
+  booksBalanced();
+});
+
+test('a fully returned sale whose cash is already spent owes the customer for later refund', async () => {
+  const supplierId = parties.createParty(db, null, { name: 'مورد بعد المرتجع', type: 'supplier' }).id;
+  const created = await invoke('invoices:create', {
+    docType: 'sales', date: '2024-02-01', partyId: customerId, paymentMethod: 'cash', cashboxId: 'cashbox_main',
+    paidNow: 8000, items: [{ productId, quantity: 1, unitPrice: 8000, discount: 0 }],
+  });
+  await invoke('invoices:return', {
+    returnType: 'sales_return', invoiceId: created.data.id, date: '2024-02-02', items: [{ productId, quantity: 1 }],
+  });
+  await invoke('invoices:create', {
+    docType: 'purchase', date: '2024-02-02', partyId: supplierId, paymentMethod: 'cash', cashboxId: 'cashbox_main',
+    paidNow: 8000, items: [{ productId, quantity: 1, unitPrice: 8000, discount: 0 }],
+  });
+  assert.equal(cashOf('cashbox_main'), 0);
+
+  const cancelled = await invoke('invoices:cancel', { invoiceId: created.data.id, date: '2024-02-03' });
+  assert.equal(cancelled.ok, true, cancelled.error);
+  assert.equal(cancelled.data.refundedCash, 0);
+  assert.equal(cancelled.data.owedToCustomer, 8000);
+  assert.equal(cancelled.data.reversalEntryNumber, null);
+  assert.equal(cashOf('cashbox_main'), 0);
+  assert.equal(partyBalance(customerId), -8000);
+  booksBalanced();
+});
+
+test('cancelling is refused when returns exceed what the invoice still owes after its discount', async () => {
+  const created = await invoke('invoices:create', {
+    docType: 'sales', date: '2024-02-01', partyId: customerId, paymentMethod: 'credit', discount: 2000,
+    items: [{ productId, quantity: 1, unitPrice: 8000, discount: 0 }],
+  });
+  assert.equal(created.ok, true, created.error);
+  assert.equal(created.data.total, 6000);
+  const returned = await invoke('invoices:return', {
+    returnType: 'sales_return', invoiceId: created.data.id, date: '2024-02-02', items: [{ productId, quantity: 1 }],
+  });
+  assert.equal(returned.ok, true, returned.error);
+
   const cancelled = await invoke('invoices:cancel', { invoiceId: created.data.id, date: '2024-02-03' });
   assert.equal(cancelled.ok, false);
-  assert.match(cancelled.error, /مرتجعات/);
+  assert.match(cancelled.error, /تتجاوز قيمتها المتبقية/);
+  const listed = await invoke('invoices:list', { docType: 'sales' });
+  assert.equal(listed.data[0].status, 'posted');
+  booksBalanced();
+});
+
+// فاتورة نقدية كاملة ثم مرتجع كامل: رصيد دائن للعميل 8000 والنقد في الخزينة 8000
+async function customerCreditFromFullReturn() {
+  const created = await invoke('invoices:create', {
+    docType: 'sales', date: '2024-02-01', partyId: customerId, paymentMethod: 'cash', cashboxId: 'cashbox_main',
+    paidNow: 8000, items: [{ productId, quantity: 1, unitPrice: 8000, discount: 0 }],
+  });
+  assert.equal(created.ok, true, created.error);
+  const returned = await invoke('invoices:return', {
+    returnType: 'sales_return', invoiceId: created.data.id, date: '2024-02-02', items: [{ productId, quantity: 1 }],
+  });
+  assert.equal(returned.ok, true, returned.error);
+  assert.equal(partyBalance(customerId), -8000);
+  assert.equal(cashOf('cashbox_main'), 8000);
+}
+
+test('a customer credit left by a full return is refunded in parts until it is cleared', async () => {
+  await customerCreditFromFullReturn();
+
+  const first = await invoke('customers:refundCredit', {
+    partyId: customerId, cashboxId: 'cashbox_main', date: '2024-02-03', amount: 3000,
+  });
+  assert.equal(first.ok, true, first.error);
+  assert.equal(first.data.creditAfter, 5000);
+  assert.equal(cashOf('cashbox_main'), 5000);
+  assert.equal(partyBalance(customerId), -5000);
+
+  const rest = await invoke('customers:refundCredit', {
+    partyId: customerId, cashboxId: 'cashbox_main', date: '2024-02-04', amount: 5000,
+  });
+  assert.equal(rest.ok, true, rest.error);
+  assert.equal(rest.data.creditAfter, 0);
+  assert.equal(cashOf('cashbox_main'), 0);
+  assert.equal(partyBalance(customerId), 0);
+
+  const credits = await invoke('customers:credits');
+  assert.equal(credits.data.length, 0);
+  assert.equal(accountNet('acc_ar'), 0);
+  assert.equal(await stockOf(), 10000);
+  booksBalanced();
+});
+
+test('a customer refund is refused above the customer credit or the cashbox balance', async () => {
+  await customerCreditFromFullReturn();
+  const supplierId = parties.createParty(db, null, { name: 'مورد الصرف', type: 'supplier' }).id;
+
+  const overCredit = await invoke('customers:refundCredit', {
+    partyId: customerId, cashboxId: 'cashbox_main', date: '2024-02-03', amount: 8001,
+  });
+  assert.equal(overCredit.ok, false);
+  assert.match(overCredit.error, /أكبر من الرصيد الدائن للعميل/);
+
+  await invoke('invoices:create', {
+    docType: 'purchase', date: '2024-02-02', partyId: supplierId, paymentMethod: 'cash', cashboxId: 'cashbox_main',
+    paidNow: 6000, items: [{ productId, quantity: 1, unitPrice: 6000, discount: 0 }],
+  });
+  assert.equal(cashOf('cashbox_main'), 2000);
+
+  const overBox = await invoke('customers:refundCredit', {
+    partyId: customerId, cashboxId: 'cashbox_main', date: '2024-02-03', amount: 3000,
+  });
+  assert.equal(overBox.ok, false);
+  assert.match(overBox.error, /أكبر من رصيد الخزينة/);
+
+  const zero = await invoke('customers:refundCredit', {
+    partyId: customerId, cashboxId: 'cashbox_main', date: '2024-02-03', amount: 0,
+  });
+  assert.equal(zero.ok, false);
+
+  const toSupplier = await invoke('customers:refundCredit', {
+    partyId: supplierId, cashboxId: 'cashbox_main', date: '2024-02-03', amount: 1000,
+  });
+  assert.equal(toSupplier.ok, false);
+  assert.match(toSupplier.error, /اختر عميلًا/);
+
+  assert.equal(cashOf('cashbox_main'), 2000);
+  assert.equal(partyBalance(customerId), -8000);
+  assert.equal(await stockOf(), 11000);
+  booksBalanced();
+});
+
+test('a customer with no credit cannot be refunded', async () => {
+  const otherId = parties.createParty(db, null, { name: 'عميل بلا رصيد', type: 'customer' }).id;
+  const result = await invoke('customers:refundCredit', {
+    partyId: otherId, cashboxId: 'cashbox_main', date: '2024-02-03', amount: 100,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /لا يوجد رصيد دائن/);
+  booksBalanced();
 });
 
 test('cancelling a sale reverses a later payment and leaves no customer balance', async () => {

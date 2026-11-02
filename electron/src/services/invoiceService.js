@@ -327,16 +327,39 @@ function listInvoices(db, docType) {
   }));
 }
 
-// الإلغاء قيد عكسي لقيد الفاتورة وكل سدادات عليها. البضاعة تعود (مبيعات) أو تُصرف (مشتريات).
+// ما لم يُرجَع بعد من كل صنف (الكمية والتكلفة). المرتجعات السابقة قيودها قائمة ولا تُعكس مرة أخرى
+function unreturnedItems(db, invoice) {
+  const returnType = returnTypeFor(invoice.doc_type);
+  const returnedStmt = db.prepare(`
+    SELECT COALESCE(SUM(ri.quantity_milli), 0) AS quantity_milli, COALESCE(SUM(ri.cost_total), 0) AS cost_total
+    FROM return_items ri JOIN returns r ON r.id = ri.return_id
+    WHERE r.invoice_id = ? AND r.return_type = ? AND ri.product_id = ?
+  `);
+  return db.prepare(`
+    SELECT product_id, SUM(quantity_milli) AS quantity_milli, SUM(cost_total) AS cost_total
+    FROM invoice_items WHERE invoice_id = ? GROUP BY product_id
+  `).all(invoice.id).map((row) => {
+    const returned = returnedStmt.get(invoice.id, returnType, row.product_id);
+    return {
+      productId: row.product_id,
+      quantityMilli: row.quantity_milli - returned.quantity_milli,
+      costTotal: row.cost_total - returned.cost_total,
+    };
+  }).filter((row) => row.quantityMilli > 0);
+}
+
+// الإلغاء يعكس المتبقي فقط بعد المرتجعات، والسدادات كما هي. البضاعة المتبقية تعود (مبيعات) أو تُصرف (مشتريات).
 // المبيعات: النقد المسترد يُقيَّد بالرصيد الفعلي للخزينة، والباقي يبقى رصيدًا دائنًا للعميل ولا تُنشأ حركة نقدية سالبة.
 function cancelInvoice(db, userId, input) {
   const invoice = readPostedInvoice(db, input?.invoiceId);
   const date = assertIsoDate(input?.date);
   const isSales = invoice.doc_type === 'sales';
 
-  if (db.prepare('SELECT 1 FROM returns WHERE invoice_id = ? LIMIT 1').get(invoice.id)) {
-    throw new UserFacingError('لا يمكن إلغاء فاتورة عليها مرتجعات');
-  }
+  const returned = db.prepare('SELECT COALESCE(SUM(total), 0) AS total FROM returns WHERE invoice_id = ?').get(invoice.id);
+  const remainingTotal = invoice.total - returned.total;
+  if (remainingTotal < 0) throw new UserFacingError('لا يمكن إلغاء هذه الفاتورة لأن المرتجعات تتجاوز قيمتها المتبقية');
+  const remainingItems = unreturnedItems(db, invoice);
+  const remainingCost = remainingItems.reduce((sum, item) => sum + item.costTotal, 0);
   const originalEntry = db.prepare('SELECT status FROM journal_entries WHERE id = ?').get(invoice.journal_entry_id);
   if (!originalEntry || originalEntry.status !== 'posted') throw new UserFacingError('لا يمكن إلغاء هذه الفاتورة');
 
@@ -350,20 +373,19 @@ function cancelInvoice(db, userId, input) {
     availableCash.set(box.id, availableCash.get(box.id) - refund);
     return { payment, box, refund, owed: payment.amount - refund };
   });
-  const items = db.prepare('SELECT * FROM invoice_items WHERE invoice_id = ? ORDER BY rowid').all(invoice.id);
 
   return db.transaction(() => {
     const cancelledAt = new Date().toISOString();
     let stockValue = 0;
-    for (const item of items) {
+    for (const item of remainingItems) {
       if (isSales) {
         receiveStock(db, {
-          date, productId: item.product_id, quantityMilli: item.quantity_milli, totalCost: item.cost_total,
+          date, productId: item.productId, quantityMilli: item.quantityMilli, totalCost: item.costTotal,
           type: 'sale_return', referenceType: 'sales_invoice_cancel', referenceId: invoice.id, userId,
         });
       } else {
         const issued = issueStock(db, {
-          date, productId: item.product_id, quantityMilli: item.quantity_milli, type: 'purchase_return',
+          date, productId: item.productId, quantityMilli: item.quantityMilli, type: 'purchase_return',
           referenceType: 'purchase_invoice_cancel', referenceId: invoice.id, userId,
         });
         stockValue += issued.totalCost;
@@ -372,13 +394,11 @@ function cancelInvoice(db, userId, input) {
 
     const reversal = [];
     if (isSales) {
-      reversal.push({ accountId: 'acc_sales', debit: invoice.total, credit: 0 }, { accountId: 'acc_ar', debit: 0, credit: invoice.total });
-      if (invoice.cost_total > 0) {
-        reversal.push({ accountId: 'acc_inventory', debit: invoice.cost_total, credit: 0 }, { accountId: 'acc_cogs', debit: 0, credit: invoice.cost_total });
-      }
+      reversal.push({ accountId: 'acc_sales', debit: remainingTotal, credit: 0 }, { accountId: 'acc_ar', debit: 0, credit: remainingTotal });
+      reversal.push({ accountId: 'acc_inventory', debit: remainingCost, credit: 0 }, { accountId: 'acc_cogs', debit: 0, credit: remainingCost });
     } else {
-      reversal.push({ accountId: 'acc_ap', debit: invoice.total, credit: 0 }, { accountId: 'acc_inventory', debit: 0, credit: stockValue });
-      const difference = invoice.total - stockValue;
+      reversal.push({ accountId: 'acc_ap', debit: remainingTotal, credit: 0 }, { accountId: 'acc_inventory', debit: 0, credit: stockValue });
+      const difference = remainingTotal - stockValue;
       if (difference > 0) reversal.push({ accountId: 'acc_purchase_returns', debit: 0, credit: difference });
       if (difference < 0) reversal.push({ accountId: 'acc_purchase_returns', debit: -difference, credit: 0 });
     }
@@ -390,7 +410,8 @@ function cancelInvoice(db, userId, input) {
       }
     }
 
-    const entry = postJournalEntry(db, {
+    const lines = reversal.filter((line) => line.debit > 0 || line.credit > 0);
+    const entry = lines.length > 0 ? postJournalEntry(db, {
       date,
       description: `إلغاء ${invoice.doc_number}`,
       referenceType: 'invoice_cancel',
@@ -399,8 +420,8 @@ function cancelInvoice(db, userId, input) {
       userId,
       isReversing: true,
       reversingOf: invoice.journal_entry_id,
-      lines: reversal.filter((line) => line.debit > 0 || line.credit > 0),
-    });
+      lines,
+    }) : null;
 
     const originalEntryIds = new Set([invoice.journal_entry_id, ...payments.map((p) => p.journal_entry_id).filter(Boolean)]);
     for (const id of originalEntryIds) {
@@ -436,19 +457,23 @@ function cancelInvoice(db, userId, input) {
         `).run(crypto.randomUUID(), invoice.party_id, date, payment.id, partyDebit, partyCredit, `إلغاء ${invoice.doc_number}`);
       }
     }
-    db.prepare(`
-      INSERT INTO party_transactions (id, party_id, date, type, reference_type, reference_id, debit, credit, description)
-      VALUES (?, ?, ?, 'adjustment', 'invoice', ?, ?, ?, ?)
-    `).run(crypto.randomUUID(), invoice.party_id, date, invoice.id,
-      isSales ? 0 : invoice.total, isSales ? invoice.total : 0, `إلغاء ${invoice.doc_number}`);
+    if (remainingTotal > 0) {
+      db.prepare(`
+        INSERT INTO party_transactions (id, party_id, date, type, reference_type, reference_id, debit, credit, description)
+        VALUES (?, ?, ?, 'adjustment', 'invoice', ?, ?, ?, ?)
+      `).run(crypto.randomUUID(), invoice.party_id, date, invoice.id,
+        isSales ? 0 : remainingTotal, isSales ? remainingTotal : 0, `إلغاء ${invoice.doc_number}`);
+    }
 
     db.prepare("UPDATE invoices SET status = 'cancelled', cancelled_at = ?, cancel_journal_entry_id = ?, updated_at = ? WHERE id = ?")
-      .run(cancelledAt, entry.id, cancelledAt, invoice.id);
+      .run(cancelledAt, entry?.id ?? null, cancelledAt, invoice.id);
     audit(db, {
       userId, action: 'cancel', module: 'sales', entityId: invoice.id, entityType: 'invoice',
-      details: { docNumber: invoice.doc_number, reversedBy: entry.entryNumber, refundedCash, owedToCustomer },
+      details: {
+        docNumber: invoice.doc_number, reversedBy: entry?.entryNumber ?? null, returnedTotal: returned.total, refundedCash, owedToCustomer,
+      },
     });
-    return { id: invoice.id, reversalEntryNumber: entry.entryNumber, refundedCash, owedToCustomer };
+    return { id: invoice.id, reversalEntryNumber: entry?.entryNumber ?? null, refundedCash, owedToCustomer };
   })();
 }
 

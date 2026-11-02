@@ -50,7 +50,7 @@ const ACCOUNT_IDS = {
   inventory: 'acc_inventory',
 };
 
-function toPiastres(pounds: number): number {
+export function toPiastres(pounds: number): number {
   return Math.round(pounds * 100);
 }
 
@@ -347,7 +347,7 @@ export async function listCashboxOptions(): Promise<CashboxOption[]> {
   return rows.filter((box) => box.is_active).map((box) => ({ id: box.id, name: box.name, balance: box.balance }));
 }
 
-export async function cancelInvoice(invoiceId: string, date: string): Promise<{ id: string; reversalEntryNumber: string }> {
+export async function cancelInvoice(invoiceId: string, date: string): Promise<{ id: string; reversalEntryNumber: string | null }> {
   const desktop = getDesktopApi();
   if (!desktop) throw new Error('إلغاء الفواتير متاح من تطبيق سطح المكتب فقط');
   return desktop.farm.invoices.cancel({ invoiceId, date });

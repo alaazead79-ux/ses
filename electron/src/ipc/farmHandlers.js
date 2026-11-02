@@ -6,6 +6,7 @@ const payroll = require('../services/payrollService');
 const treasury = require('../services/treasuryService');
 const backups = require('../services/backupService');
 const invoices = require('../services/invoiceService');
+const customerCredits = require('../services/customerCreditService');
 const inventory = require('../services/inventoryService');
 const { dashboardSummary } = require('../services/dashboardService');
 
@@ -52,6 +53,8 @@ function farmChannels() {
     ['invoices:pay', 'sales.add', (db, uid, input) => invoices.recordPayment(db, uid, input)],
     ['invoices:return', 'sales.add', (db, uid, input) => invoices.createReturn(db, uid, input)],
     ['invoices:cancel', 'sales.edit', (db, uid, input) => invoices.cancelInvoice(db, uid, input)],
+    ['customers:credits', 'sales.view', (db) => customerCredits.listCustomerCredits(db)],
+    ['customers:refundCredit', 'treasury.add', (db, uid, input) => customerCredits.refundCustomerCredit(db, uid, input)],
 
     ['dashboard:summary', 'dashboard.view', (db, _uid, args) => dashboardSummary(db, args)],
   ];

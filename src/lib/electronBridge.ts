@@ -97,7 +97,11 @@ export interface DesktopApi {
       create: (input: Record<string, unknown>) => Promise<{ id: string; docNumber: string; total: number; paidAmount: number }>;
       pay: (input: Record<string, unknown>) => Promise<{ id: string; docNumber: string }>;
       return: (input: Record<string, unknown>) => Promise<{ id: string; docNumber: string; total: number; cost: number }>;
-      cancel: (input: { invoiceId: string; date: string }) => Promise<{ id: string; reversalEntryNumber: string }>;
+      cancel: (input: { invoiceId: string; date: string }) => Promise<{ id: string; reversalEntryNumber: string | null }>;
+    };
+    customers: {
+      credits: () => Promise<DesktopCustomerCreditRow[]>;
+      refundCredit: (input: { partyId: string; cashboxId: string; date: string; amount: number }) => Promise<{ id: string; docNumber: string; amount: number; creditAfter: number }>;
     };
     treasury: {
       cashboxes: () => Promise<unknown[]>;
@@ -211,6 +215,12 @@ export interface DesktopInvoiceItemRow {
   unit_price: number;
   discount: number;
   total: number;
+}
+
+export interface DesktopCustomerCreditRow {
+  id: string;
+  name: string;
+  credit: number;
 }
 
 export interface DesktopInvoiceRow {

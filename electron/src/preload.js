@@ -59,6 +59,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       return: (input) => invoke('invoices:return', input),
       cancel: (input) => invoke('invoices:cancel', input),
     },
+    customers: {
+      credits: () => invoke('customers:credits'),
+      refundCredit: (input) => invoke('customers:refundCredit', input),
+    },
     treasury: {
       createCashbox: (input) => invoke('treasury:createCashbox', input),
       statement: (args) => invoke('treasury:statement', args),
