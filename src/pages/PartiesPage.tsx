@@ -55,7 +55,7 @@ export default function PartiesPage() {
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-1">
                         <button onClick={() => setStatementParty(p)} className="btn-ghost p-1.5" title="كشف حساب"><Eye className="h-4 w-4" /></button>
-                        {hasPermission('parties.delete') && <button onClick={async () => { if (confirm('حذف هذا الطرف؟')) { await deleteParty(p.id); load(); } }} className="btn-ghost p-1.5 text-rose-500"><Edit2 className="h-4 w-4" /></button>}
+                        {hasPermission('parties.delete') && <button onClick={async () => { if (confirm('حذف هذا الطرف؟')) { try { await deleteParty(p.id); load(); } catch (e) { alert(e instanceof Error ? e.message : 'تعذر حذف الطرف'); } } }} className="btn-ghost p-1.5 text-rose-500"><Edit2 className="h-4 w-4" /></button>}
                       </div>
                     </td>
                   </tr>

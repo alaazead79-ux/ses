@@ -80,6 +80,15 @@ export interface DesktopApi {
       create: (input: Record<string, unknown>) => Promise<{ id: string; docNumber: string; amount: number }>;
       cancel: (input: { incomeId: string; date: string }) => Promise<{ id: string; reversalEntryNumber: string }>;
     };
+    parties: {
+      list: (args?: { type?: string | null; search?: string }) => Promise<DesktopPartyRow[]>;
+      create: (input: DesktopPartyInput) => Promise<{ id: string }>;
+      statement: (args: { partyId: string; dateFrom?: string | null; dateTo?: string | null }) => Promise<DesktopPartyStatement>;
+      delete: (partyId: string) => Promise<void>;
+    };
+    activities: {
+      list: () => Promise<DesktopActivityRow[]>;
+    };
     treasury: {
       cashboxes: () => Promise<unknown[]>;
       createCashbox: (input: Record<string, unknown>) => Promise<{ id: string }>;
@@ -129,6 +138,50 @@ export interface DashboardSummary {
   stockValue: number;
   lowStockCount: number;
   monthProfit: number;
+}
+
+export interface DesktopPartyRow {
+  id: string;
+  name: string;
+  type: string;
+  phone: string | null;
+  status: string;
+  activity_id: string | null;
+  balance: number;
+}
+
+export interface DesktopPartyInput {
+  name: string;
+  type: string;
+  phone: string | null;
+  address: string | null;
+  notes: string | null;
+  activityId: string | null;
+  openingBalance: number;
+  date: string;
+}
+
+export interface DesktopPartyStatement {
+  party: Omit<DesktopPartyRow, 'balance'>;
+  opening: number;
+  closing: number;
+  rows: {
+    date: string;
+    type: string;
+    reference_type: string | null;
+    reference_id: string | null;
+    description: string | null;
+    debit: number;
+    credit: number;
+  }[];
+}
+
+export interface DesktopActivityRow {
+  id: string;
+  name: string;
+  description: string | null;
+  is_active: number;
+  sort_order: number;
 }
 
 declare global {

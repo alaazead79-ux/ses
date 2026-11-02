@@ -1,4 +1,5 @@
 import { getDb } from '@/db/db';
+import { getDesktopApi } from '@/lib/electronBridge';
 
 export interface Activity {
   id: string;
@@ -9,6 +10,11 @@ export interface Activity {
 }
 
 export async function listActivities(): Promise<Activity[]> {
+  const desktop = getDesktopApi();
+  if (desktop) {
+    const rows = await desktop.farm.activities.list();
+    return rows.map((row) => ({ ...row, is_active: row.is_active === 1 }));
+  }
   const db = await getDb();
   const res = await db.query<Activity>(
     'SELECT id, name, description, is_active, sort_order FROM activities ORDER BY sort_order, name'

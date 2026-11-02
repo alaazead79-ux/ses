@@ -153,11 +153,47 @@ function recordPartyOpeningBalance(db, userId, input) {
   })();
 }
 
+// الطرف الذي له أي حركة أو مستند لا يُحذف، ويُوقف بتغيير حالته بدلًا من ذلك
+function deleteParty(db, userId, partyId) {
+  readParty(db, partyId);
+  const usage = db.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM party_transactions WHERE party_id = @id) +
+      (SELECT COUNT(*) FROM invoices WHERE party_id = @id) +
+      (SELECT COUNT(*) FROM returns WHERE party_id = @id) +
+      (SELECT COUNT(*) FROM payments WHERE party_id = @id) +
+      (SELECT COUNT(*) FROM cash_transactions WHERE party_id = @id) AS total
+  `).get({ id: partyId }).total;
+  if (usage > 0) throw new UserFacingError('لا يمكن حذف طرف له حركات. غيّر حالته إلى غير نشط بدلًا من ذلك');
+  db.prepare('DELETE FROM parties WHERE id = ?').run(partyId);
+  audit(db, { userId, action: 'delete', module: 'parties', entityId: partyId, entityType: 'party' });
+}
+
+// الرصيد الموجب مدين (عميل) والسالب دائن (مورد)، ويُسجَّل مع الطرف في معاملة واحدة
+function createPartyWithOpening(db, userId, input) {
+  const opening = input?.openingBalance ?? 0;
+  if (!Number.isSafeInteger(opening)) throw new UserFacingError('الرصيد الافتتاحي غير صالح');
+  return db.transaction(() => {
+    const { id } = createParty(db, userId, input);
+    if (opening !== 0) {
+      recordPartyOpeningBalance(db, userId, {
+        partyId: id,
+        date: input?.date,
+        amount: Math.abs(opening),
+        side: opening > 0 ? 'receivable' : 'payable',
+      });
+    }
+    return { id };
+  })();
+}
+
 module.exports = {
   PARTY_TYPES,
   listParties,
   createParty,
+  createPartyWithOpening,
   updateParty,
+  deleteParty,
   partyStatement,
   partyBalance,
   recordPartyOpeningBalance,

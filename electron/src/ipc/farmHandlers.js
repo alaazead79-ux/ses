@@ -1,5 +1,7 @@
 const { handleSafely } = require('./handleSafely');
 const expenses = require('../services/expenseService');
+const parties = require('../services/partyService');
+const accounting = require('../services/accountingService');
 const payroll = require('../services/payrollService');
 const treasury = require('../services/treasuryService');
 const backups = require('../services/backupService');
@@ -26,6 +28,11 @@ function farmChannels() {
     ['transfers:create', 'transfers.add', (db, uid, input) => treasury.createTransfer(db, uid, input)],
     ['checks:list', 'checks.view', (db) => treasury.listChecks(db)],
     ['checks:create', 'checks.add', (db, uid, input) => treasury.createCheck(db, uid, input)],
+    ['activities:list', 'parties.view', (db) => accounting.listActivities(db)],
+    ['parties:list', 'parties.view', (db, _uid, args) => parties.listParties(db, args)],
+    ['parties:create', 'parties.add', (db, uid, input) => parties.createPartyWithOpening(db, uid, input)],
+    ['parties:statement', 'parties.view', (db, _uid, args) => parties.partyStatement(db, args)],
+    ['parties:delete', 'parties.delete', (db, uid, input) => parties.deleteParty(db, uid, input?.partyId)],
 
     ['employees:list', 'employees.view', (db) => payroll.listEmployees(db)],
     ['employees:create', 'employees.add', (db, uid, input) => payroll.createEmployee(db, uid, input)],

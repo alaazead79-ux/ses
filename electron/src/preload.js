@@ -40,8 +40,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
       create: (input) => invoke('incomes:create', input),
       cancel: (input) => invoke('incomes:cancel', input),
     },
+    parties: {
+      list: (args) => invoke('parties:list', args),
+      create: (input) => invoke('parties:create', input),
+      statement: (args) => invoke('parties:statement', args),
+      delete: (partyId) => invoke('parties:delete', { partyId }),
+    },
+    activities: {
+      list: () => invoke('activities:list'),
+    },
     treasury: {
-      cashboxes: () => invoke('treasury:cashboxes'),
       createCashbox: (input) => invoke('treasury:createCashbox', input),
       statement: (args) => invoke('treasury:statement', args),
       transfers: () => invoke('transfers:list'),

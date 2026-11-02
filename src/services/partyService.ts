@@ -1,4 +1,9 @@
 import { getDb, toCents } from '@/db/db';
+import {
+  getDesktopApi,
+  type DesktopPartyRow,
+  type DesktopApi,
+} from '@/lib/electronBridge';
 
 export interface Party {
   id: string;
@@ -15,7 +20,36 @@ export interface Party {
   total_transactions: number;
 }
 
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function fromDesktopRow(row: DesktopPartyRow): Party {
+  return {
+    id: row.id,
+    name: row.name,
+    type: row.type,
+    phone: row.phone,
+    address: null,
+    contact: null,
+    opening_balance: 0,
+    notes: null,
+    status: row.status,
+    activity_id: row.activity_id,
+    balance: row.balance,
+    total_transactions: 0,
+  };
+}
+
 export async function listParties(typeFilter?: string): Promise<Party[]> {
+  const desktop = getDesktopApi();
+  if (desktop) {
+    const rows = await desktop.farm.parties.list();
+    return rows
+      .filter((row) => !typeFilter || row.type === typeFilter || row.type === 'both')
+      .map(fromDesktopRow);
+  }
+
   const db = await getDb();
   let query = `
     SELECT p.id, p.name, p.type, p.phone, p.address, p.contact,
@@ -43,7 +77,7 @@ export async function listParties(typeFilter?: string): Promise<Party[]> {
   return res.rows;
 }
 
-export async function createParty(data: {
+export interface CreatePartyInput {
   name: string;
   type: string;
   phone?: string;
@@ -52,7 +86,24 @@ export async function createParty(data: {
   openingBalance?: number;
   notes?: string;
   activityId?: string | null;
-}): Promise<Party> {
+}
+
+// الرصيد الافتتاحي بالجنيه: الموجب مدين (عميل)، والسالب دائن (مورد)
+export async function createParty(data: CreatePartyInput): Promise<{ id: string }> {
+  const desktop: DesktopApi | null = getDesktopApi();
+  if (desktop) {
+    return desktop.farm.parties.create({
+      name: data.name,
+      type: data.type,
+      phone: data.phone ?? null,
+      address: data.address ?? null,
+      notes: data.notes ?? null,
+      activityId: data.activityId ?? null,
+      openingBalance: Math.round((data.openingBalance ?? 0) * 100),
+      date: todayIso(),
+    });
+  }
+
   const db = await getDb();
   const res = await db.query<Party>(
     `INSERT INTO parties (name, type, phone, address, contact, opening_balance, notes, activity_id)
@@ -85,6 +136,11 @@ export async function updateParty(id: string, data: Partial<{
 }
 
 export async function deleteParty(id: string): Promise<void> {
+  const desktop = getDesktopApi();
+  if (desktop) {
+    await desktop.farm.parties.delete(id);
+    return;
+  }
   const db = await getDb();
   await db.query('DELETE FROM parties WHERE id = $1', [id]);
 }
@@ -100,6 +156,38 @@ export interface PartyStatementRow {
 }
 
 export async function getPartyStatement(partyId: string, dateFrom?: string, dateTo?: string): Promise<{ party: Party; rows: PartyStatementRow[]; opening: number; closing: number }> {
+  const desktop = getDesktopApi();
+  if (desktop) {
+    const statement = await desktop.farm.parties.statement({
+      partyId,
+      dateFrom: dateFrom ?? null,
+      dateTo: dateTo ?? null,
+    });
+    const rows: PartyStatementRow[] = [
+      { date: '', type: 'opening', reference_type: null, description: 'رصيد افتتاحي', debit: 0, credit: 0, balance: statement.opening },
+      ...statement.rows.map((row) => ({
+        date: row.date,
+        type: row.type,
+        reference_type: row.reference_type,
+        description: row.description,
+        debit: row.debit,
+        credit: row.credit,
+        balance: 0,
+      })),
+    ];
+    let running = statement.opening;
+    for (const row of rows.slice(1)) {
+      running += row.debit - row.credit;
+      row.balance = running;
+    }
+    return {
+      party: fromDesktopRow({ ...statement.party, balance: statement.closing }),
+      rows,
+      opening: statement.opening,
+      closing: statement.closing,
+    };
+  }
+
   const db = await getDb();
   const pRes = await db.query('SELECT * FROM parties WHERE id = $1', [partyId]);
   if (pRes.rows.length === 0) throw new Error('الطرف غير موجود');
